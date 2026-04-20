@@ -2,3 +2,16 @@
 *.zip
 Data/
 Screenshots1/
+Code/
+Codee/
+EM_GoldStandard.txt
+EM_GoldStandard_Full.txt
+EM_goldstandard.pine
+Multi_Market_Report.md
+NQ_Optimization_Report.md
+Strategy_Lab_Report.md
+ablation_study.py
+backtest_all_markets.py
+generate_pairs.py
+optimize_nq.py
+strategy_lab.py
