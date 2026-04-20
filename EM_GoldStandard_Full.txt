@@ -1,0 +1,309 @@
+{==============================================================================
+ EM FUTURES STRATEGY v5.0 FULL (TradeStation Port)
+ Includes ALL 5 Missing Features for Performance Comparison
+==============================================================================}
+
+Inputs:
+    // Core Parameters
+    MS_Length(5),
+    LQ_SwingLen(10),
+    LQ_SweepWickRatio(0.3),
+    Disp_AtrMult(2.0),
+    
+    // VWAP & Order Flow
+    RVOL_Length(20),
+    RVOL_Thresh(1.5),
+    
+    // Moving Averages
+    FastEMA_Len(9),
+    SlowEMA_Len(21),
+    TrendSMA_Len(200),
+    HTF_EMALen(21),
+    
+    // 1. Market Profile (Heavy CPU)
+    MP_Enable(True),
+    MP_Lookback(50),
+    MP_Rows(24),
+    
+    // 2. Key Daily Levels
+    LV_Enable(True),
+    
+    // 3. Consolidation & Expansion
+    CE_Enable(True),
+    CE_Lookback(20),
+    CE_AtrRatio(0.5),
+    CE_ExpMult(1.5),
+    
+    // 4. Fair Value Gaps
+    FVG_Enable(True),
+    FVG_MinATR(0.3),
+    
+    // 5. ICT Time Macros
+    ICT_Enable(True),
+    
+    // Confluence Constraints
+    Min_Confluence(4),
+    Min_Probability(25),
+    
+    // Risk Management
+    ATR_Length(14),
+    ATR_StopMult(1.0),
+    Risk_Percent(1.0),
+    Trade_Capital(50000), // Change this to your starting account size
+    Enable_Compounding(True);
+
+Variables:
+    // Core
+    GlobalATR(0), EmaFast(0), EmaSlow(0), SmaTrend(0), HtfEma(0), HtfClose(0), 
+    PivH(0), PivL(0), RevBull(False), RevBear(False),
+    TopWickRatio(0), BotWickRatio(0), LqSweepHigh(False), LqSweepLow(False),
+    
+    // VWAP & Order Flow
+    VwapVal(0), Rng(0), DeltaApx(0), CumDelta(0),
+    AvgVol(0), RvolRatio(0), RvolHigh(False),
+    TrappedLongs(False), TrappedShorts(False),
+    
+    // Bias & Prob
+    BullConf(0), BearConf(0), MaxConf(22),
+    BullProb(0), BearProb(0), BullSignal(False), BearSignal(False),
+    
+    // Execution
+    SlAbs(0), SysRisk(0), CompQty(0), FinalQty(1),
+    PosTp(0), CurrentSL(0), CurrentTP(0),
+    
+    // Daily Levels
+    MidnightOpen(0), PDH(0), PDL(0), PDC(0),
+    
+    // Consolidation & Displacement
+    IsConsolidating(False), LastConsolidating(False), ExpBody(0),
+    ExpBull(False), ExpBear(False),
+    DispUp(False), DispDn(False),
+    
+    // Fair Value Gaps
+    BullFVG(False), BearFVG(False),
+    
+    // ICT Time
+    SBMacro(False),
+    
+    // Market Profile
+    ProfileHi(0), ProfileLo(0), RowSize(0), MaxVol(0), MaxRow(0),
+    TotalVol(0), PocLevel(0), r(0), b(0), RowLo(0), RowHi(0), BarLo(0), BarHi(0),
+    Overlap(0), BarRng(0), Proportion(0), Allocated(0), Val(0),
+    
+    LqH_Idx(0), LqL_Idx(0), NearestLqH(0), NearestLqL(0), idx(0);
+
+Arrays:
+    VolArr[50](0),
+    LqHighs[20](0),
+    LqLows[20](0);
+
+{ ── Core Data ── }
+GlobalATR = AvgTrueRange(ATR_Length);
+EmaFast = XAverage(Close, FastEMA_Len);
+EmaSlow = XAverage(Close, SlowEMA_Len);
+SmaTrend = Average(Close, TrendSMA_Len);
+HtfEma = XAverage(Close, HTF_EMALen) Data2;
+HtfClose = Close Data2;
+
+{ ── 1. Daily Levels & Midnight Open ── }
+If Date <> Date[1] Then MidnightOpen = Open;
+PDH = HighD(1);
+PDL = LowD(1);
+PDC = CloseD(1);
+
+{ ── 2. Consolidation & Expansion ── }
+If CE_Enable Then Begin
+    LastConsolidating = IsConsolidating;
+    Variables: RngHi(0), RngLo(0), CEAtr(0), RangeSize(0);
+    RngHi = Highest(High, CE_Lookback);
+    RngLo = Lowest(Low, CE_Lookback);
+    CEAtr = AvgTrueRange(CE_Lookback);
+    RangeSize = RngHi - RngLo;
+    IsConsolidating = RangeSize < (CEAtr * CE_AtrRatio * CE_Lookback / 14);
+    
+    ExpBody = AbsValue(Close - Open);
+    ExpBull = LastConsolidating AND (IsConsolidating = False) AND ExpBody > GlobalATR * CE_ExpMult AND Close > Open;
+    ExpBear = LastConsolidating AND (IsConsolidating = False) AND ExpBody > GlobalATR * CE_ExpMult AND Close < Open;
+End;
+
+{ ── 3. Displacement & Fair Value Gaps ── }
+DispUp = AbsValue(Close - Open) > GlobalATR * Disp_AtrMult AND Close > Open;
+DispDn = AbsValue(Close - Open) > GlobalATR * Disp_AtrMult AND Close < Open;
+
+If FVG_Enable AND CurrentBar > 2 Then Begin
+    BullFVG = Low > High[2] AND (Low - High[2]) > GlobalATR * FVG_MinATR;
+    BearFVG = High < Low[2] AND (Low[2] - High) > GlobalATR * FVG_MinATR;
+End;
+
+{ ── 4. ICT Time Macros ── }
+If ICT_Enable Then Begin
+    SBMacro = (Time >= 1000 AND Time <= 1100) OR (Time >= 1400 AND Time <= 1500) OR 
+              (Time >= 0950 AND Time <= 1010);
+End;
+
+{ ── 5. Market Profile (POC) ── }
+If MP_Enable AND CurrentBar > MP_Lookback Then Begin
+    ProfileHi = Highest(High, MP_Lookback);
+    ProfileLo = Lowest(Low, MP_Lookback);
+    RowSize = (ProfileHi - ProfileLo) / MP_Rows;
+    MaxVol = 0; MaxRow = 0; TotalVol = 0;
+    
+    For r = 0 to 49 Begin VolArr[r] = 0; End;
+    
+    If RowSize > 0 Then Begin
+        For b = 0 to MP_Lookback - 1 Begin
+            For r = 0 to MP_Rows - 1 Begin
+                RowLo = ProfileLo + r * RowSize;
+                RowHi = RowLo + RowSize;
+                BarLo = Low[b];
+                BarHi = High[b];
+                
+                Overlap = MaxList(0, MinList(BarHi, RowHi) - MaxList(BarLo, RowLo));
+                BarRng = BarHi - BarLo;
+                
+                If BarRng > 0 AND Overlap > 0 Then Begin
+                    Proportion = Overlap / BarRng;
+                    Allocated = Volume[b] * Proportion;
+                    VolArr[r] = VolArr[r] + Allocated;
+                End;
+            End;
+        End;
+        
+        For r = 0 to MP_Rows - 1 Begin
+            Val = VolArr[r];
+            TotalVol = TotalVol + Val;
+            If Val > MaxVol Then Begin
+                MaxVol = Val;
+                MaxRow = r;
+            End;
+        End;
+        PocLevel = ProfileLo + (MaxRow + 0.5) * RowSize;
+    End;
+End;
+
+{ ── Order Flow & VWAP ── }
+Rng = High - Low;
+If Rng > 0 Then DeltaApx = Volume * ((Close - Low) / Rng) - Volume * ((High - Close) / Rng)
+Else DeltaApx = IFF(Close >= Open, Volume, -Volume);
+
+If Date <> Date[1] Then CumDelta = 0;
+CumDelta = CumDelta + DeltaApx;
+
+AvgVol = Average(Volume, RVOL_Length);
+If AvgVol > 0 Then RvolRatio = Volume / AvgVol Else RvolRatio = 0;
+RvolHigh = RvolRatio >= RVOL_Thresh;
+
+Variables: SumPV(0), SumV(0), TyP(0);
+TyP = TypicalPrice;
+If Date <> Date[1] Then Begin SumPV = 0; SumV = 0; End;
+SumPV = SumPV + (TyP * Volume);
+SumV = SumV + Volume;
+If SumV <> 0 Then VwapVal = SumPV / SumV;
+
+TrappedLongs = Close[1] > Open[1] AND (Close[1] - Open[1]) > GlobalATR * 1.0 AND Close < Open[1] AND Volume > AvgVol;
+TrappedShorts = Close[1] < Open[1] AND (Open[1] - Close[1]) > GlobalATR * 1.0 AND Close > Open[1] AND Volume > AvgVol;
+
+{ ── Liquidity Pools & Sweeps ── }
+PivH = SwingHigh(1, High, LQ_SwingLen, LQ_SwingLen);
+PivL = SwingLow(1, Low, LQ_SwingLen, LQ_SwingLen);
+
+If PivH <> -1 Then Begin LqHighs[LqH_Idx] = PivH; LqH_Idx = Mod(LqH_Idx + 1, 20); End;
+If PivL <> -1 Then Begin LqLows[LqL_Idx] = PivL; LqL_Idx = Mod(LqL_Idx + 1, 20); End;
+
+TopWickRatio = IFF(Rng > 0, (High - MaxList(Open, Close)) / Rng, 0);
+BotWickRatio = IFF(Rng > 0, (MinList(Open, Close) - Low) / Rng, 0);
+
+LqSweepHigh = False; LqSweepLow = False;
+For idx = 0 to 19 Begin
+    If LqHighs[idx] <> 0 AND High > LqHighs[idx] AND Close < LqHighs[idx] AND TopWickRatio >= LQ_SweepWickRatio Then LqSweepHigh = True;
+End;
+For idx = 0 to 19 Begin
+    If LqLows[idx] <> 0 AND Low < LqLows[idx] AND Close > LqLows[idx] AND BotWickRatio >= LQ_SweepWickRatio Then LqSweepLow = True;
+End;
+
+RevBull = LqSweepLow AND Close > Open;
+RevBear = LqSweepHigh AND Close < Open;
+
+{ ── Confluence Engine (FULL MAX SCORE: 22) ── }
+BullConf = 0; BearConf = 0;
+
+If RevBull Then BullConf = BullConf + 3;
+If Close > VwapVal Then BullConf = BullConf + 1;
+If EmaFast > EmaSlow Then BullConf = BullConf + 1;
+If Close > SmaTrend Then BullConf = BullConf + 1;
+If HtfClose > HtfEma Then BullConf = BullConf + 1;
+If DeltaApx > 0 Then BullConf = BullConf + 1;
+If RvolHigh Then BullConf = BullConf + 1;
+If TrappedShorts Then BullConf = BullConf + 2;
+// Re-added Features
+If MP_Enable AND AbsValue(Close - PocLevel) < GlobalATR * 0.5 Then BullConf = BullConf + 1;
+If LV_Enable AND MidnightOpen <> 0 AND Close > MidnightOpen Then BullConf = BullConf + 1;
+If CE_Enable AND ExpBull Then BullConf = BullConf + 2;
+If DispUp Then BullConf = BullConf + 2;
+If ICT_Enable AND SBMacro Then BullConf = BullConf + 2;
+
+If RevBear Then BearConf = BearConf + 3;
+If Close < VwapVal Then BearConf = BearConf + 1;
+If EmaFast < EmaSlow Then BearConf = BearConf + 1;
+If Close < SmaTrend Then BearConf = BearConf + 1;
+If HtfClose < HtfEma Then BearConf = BearConf + 1;
+If DeltaApx < 0 Then BearConf = BearConf + 1;
+If RvolHigh Then BearConf = BearConf + 1;
+If TrappedLongs Then BearConf = BearConf + 2;
+// Re-added Features
+If MP_Enable AND AbsValue(Close - PocLevel) < GlobalATR * 0.5 Then BearConf = BearConf + 1;
+If LV_Enable AND MidnightOpen <> 0 AND Close < MidnightOpen Then BearConf = BearConf + 1;
+If CE_Enable AND ExpBear Then BearConf = BearConf + 2;
+If DispDn Then BearConf = BearConf + 2;
+If ICT_Enable AND SBMacro Then BearConf = BearConf + 2;
+
+BullProb = (BullConf / MaxConf) * 100;
+BearProb = (BearConf / MaxConf) * 100;
+
+BullSignal = (BullConf >= Min_Confluence) AND (BullProb >= Min_Probability);
+BearSignal = (BearConf >= Min_Confluence) AND (BearProb >= Min_Probability);
+
+{ ── Position Sizing ── }
+SlAbs = GlobalATR * ATR_StopMult;
+If Enable_Compounding Then Begin
+    SysRisk = (Trade_Capital + NetProfit) * (Risk_Percent / 100);
+    If SlAbs > 0 AND BigPointValue > 0 Then CompQty = SysRisk / (SlAbs * BigPointValue);
+    FinalQty = MaxList(IntPortion(CompQty), 1);
+End Else Begin
+    FinalQty = 1;
+End;
+
+{ ── SMC Execution & Automatic Stops ── }
+NearestLqH = 999999;
+For idx = 0 to 19 Begin
+    If LqHighs[idx] > Close AND LqHighs[idx] < NearestLqH Then NearestLqH = LqHighs[idx];
+End;
+
+PosTp = IFF(NearestLqH <> 999999 AND (NearestLqH - Close) >= (SlAbs * 1.5), NearestLqH, Close + GlobalATR * 3.0);
+If BullSignal AND MarketPosition <= 0 Then Begin
+    Buy ("FULL L") FinalQty shares next bar at Market;
+    CurrentSL = Close - SlAbs;
+    CurrentTP = PosTp;
+End;
+
+NearestLqL = 0;
+For idx = 0 to 19 Begin
+    If LqLows[idx] > 0 AND LqLows[idx] < Close AND LqLows[idx] > NearestLqL Then NearestLqL = LqLows[idx];
+End;
+
+PosTp = IFF(NearestLqL <> 0 AND (Close - NearestLqL) >= (SlAbs * 1.5), NearestLqL, Close - GlobalATR * 3.0);
+If BearSignal AND MarketPosition >= 0 Then Begin
+    SellShort ("FULL S") FinalQty shares next bar at Market;
+    CurrentSL = Close + SlAbs;
+    CurrentTP = PosTp;
+End;
+
+If MarketPosition = 1 Then Begin
+    Sell ("Exit L Stop") Next Bar at CurrentSL Stop;
+    Sell ("Exit L Limit") Next Bar at CurrentTP Limit;
+End;
+
+If MarketPosition = -1 Then Begin
+    BuyToCover ("Exit S Stop") Next Bar at CurrentSL Stop;
+    BuyToCover ("Exit S Limit") Next Bar at CurrentTP Limit;
+End;
